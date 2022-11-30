@@ -18,13 +18,12 @@ from GAN.gan_utils import load_GAN_model, generate_fake_data,\
 from GAN.gan_clf_test import gan_select_epoch
 
 
-
 if __name__ == "__main__":
     data_directory = os.path.join('..', 'aloe', 'localisation', 'data', ''.format(os.path.sep))
     save_directory = os.path.join('..', 'aloe', 'GAN', 'save_GANs', ''.format(os.path.sep))
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    house_name = 'A'
+    house_name = 'C'
     reduce_ap = False
     if house_name == 'A':
         col_idx_use = [1, 2, 3, 4, 5, 6, 7, 8]
@@ -55,7 +54,7 @@ if __name__ == "__main__":
 
     NUM_CLASSES = num_room_house[house_name]
     APs = len(col_idx_use)
-    total_number = 600
+    total_number = 700
 
     all_acc = []
     all_f1 = []

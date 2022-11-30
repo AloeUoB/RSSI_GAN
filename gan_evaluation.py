@@ -20,12 +20,38 @@ from general_utils import uniq_count
 from GAN.gan_utils import load_GAN_model, generate_fake_data, get_fake_rssi,\
     MinMaxScaler, renormalization, windowing, get_mean_stat, get_stats,\
     plot_line_rssi_gan, MLPClassifier, map_A, map_B, map_C, map_D, house_map,\
-    binary_convert, num_room_house, train, test
+    binary_convert, num_room_house, train, test, plot_line_rssi_all, get_col_use
 from play_space import feature
+
+def confuse_acc(X_test, y_test, model):
+    output = model(X_test)
+    pred = output.argmax(1)
+    pred = pred.cpu().detach().numpy()
+    true = y_test.cpu().detach().numpy()
+    cf_mat = confusion_matrix(true, pred)
+    class_acc = []
+    for i in range(len(np.unique(true))):
+        class_acc.append(cf_mat[i][i] / np.sum(cf_mat[i]) * 100)
+
+    return cf_mat, class_acc
+
+def plot_class_acc(class_acc, house_map, plot_title, save_dir,color):
+    label_plot = np.arange(1, len(class_acc)+1).tolist()
+    for i in range(len(label_plot)):
+        label_plot[i] = house_map[label_plot[i]]
+    plt.bar(label_plot, class_acc, color = color)
+    plt.title("%s" % (plot_title), fontsize=14)
+    plt.xticks(fontsize=14, rotation=90)
+    plt.yticks(fontsize=14)
+    plt.ylim(0, 100)
+    plt.tight_layout()
+    plt.savefig(save_dir + plot_title + '.png')
+    plt.show()
+
 
 
 def multiclass(windowed_data, windowed_label, windowed_data_fl, windowed_label_fl, fake_data, y_fake,
-               APs, NUM_CLASSES, GANmodel, device, test_set='flive', exp=1, runs=1, show_epoch=True,
+               house_name, house_map, APs, NUM_CLASSES, GANmodel, device, f1_type ='weighted', test_set='flive', exp=1, runs=1, epochs=200, show_epoch=True,
                feature=False, flatten=True, confusion_met=True, rt=False):
 
     X1, X2, y1, y2 = train_test_split(windowed_data, windowed_label, test_size=0.3, shuffle=True,
@@ -44,6 +70,9 @@ def multiclass(windowed_data, windowed_label, windowed_data_fl, windowed_label_f
             y_fake = y_fake.cpu().detach().numpy()
         X_train = torch.cat((torch.from_numpy(X1).to(device), torch.from_numpy(fake_data).to(device)), dim=0)
         y_train = torch.cat((torch.from_numpy(y1).to(device), torch.from_numpy(y_fake).to(device)), dim=0)
+    if exp == 3:
+        X_train = torch.from_numpy(X1)
+        y_train = torch.from_numpy(y1)
 
     # TEST set
     if test_set == 'fp':
@@ -75,6 +104,8 @@ def multiclass(windowed_data, windowed_label, windowed_data_fl, windowed_label_f
     model_type = "mlp"
     print(test_set, 'experiment', exp, model_type, 'model', GANmodel, 'feature',feature)
     F1_all_1 = []
+    F1_all_2 = []
+    mcc_all = []
     acc_all_1 = []
     for i in range(runs):
         # if model_type == "log":
@@ -87,22 +118,44 @@ def multiclass(windowed_data, windowed_label, windowed_data_fl, windowed_label_f
 
         optimizer = torch.optim.Adam(model.parameters(), lr=3e-4)
         criterion = torch.nn.CrossEntropyLoss()
-        epochs = 200
+        epochs = epochs
+        loss_threshold = 0.0001
+        keep_loss = []
+        keep_avg_loss = 0
         for epoch in range(epochs):
-            loss_epoch, accuracy_epoch, f1_epoch = train(train_loader, model, optimizer, criterion)
-            # train(train_loader, model, optimizer, criterion)
+            loss_epoch, accuracy_epoch, f1_epoch_w, f1_epoch_m = train(train_loader, model, optimizer, criterion)
+            keep_loss.append(loss_epoch)
+            if epoch % 10 == 0 and epoch != 0:
+
+                # if abs(keep_avg_loss - (sum(keep_loss) / 10)) < loss_threshold:
+                #     # print(
+                #     #     f"Epoch [{epoch}/{epochs}]\t "
+                #     #     f"Loss: {loss_epoch / len(train_loader)}\t "
+                #     #     f"Accuracy: {accuracy_epoch}\t "
+                #     #     f"F1_weighted: {f1_epoch_w * 100}\t"
+                #     #     f"F1_macro: {f1_epoch_m * 100}\t")
+                #     break
+                # else:
+                #     keep_avg_loss = sum(keep_loss) / 10
+                keep_loss = []
             if show_epoch:
                 print(
                     f"Epoch [{epoch}/{epochs}]\t "
                     f"Loss: {loss_epoch / len(train_loader)}\t "
                     f"Accuracy: {accuracy_epoch}\t "
-                    f"F1: {f1_epoch * 100}\t")
+                    f"F1: {f1_epoch_w * 100}\t")
 
-        loss, accuracy, f1 = test(test_loader, model, criterion)
-        F1_all_1.append(f1)
+        loss, accuracy, f1_weight, f1_mac, mcc = test(test_loader, model, criterion)
+        F1_all_1.append(f1_weight)
+        F1_all_2.append(f1_mac)
+        mcc_all.append(mcc*100)
         acc_all_1.append(accuracy)
 
-    print('Average f1: ', sum(F1_all_1) / len(F1_all_1))
+    print('Average f1_weighted: ', sum(F1_all_1) / len(F1_all_1))
+    print('Average f1_macro: ', sum(F1_all_2) / len(F1_all_2))
+    print('Average mcc: ', sum(mcc_all) / len(mcc_all))
+    print('Average accuracy: ', sum(acc_all_1) / len(acc_all_1))
+
     # pred, true = model_test(X_test.float(), y_test, model)
     if confusion_met:
         _output = model(X_test.float())
@@ -114,11 +167,26 @@ def multiclass(windowed_data, windowed_label, windowed_data_fl, windowed_label_f
         f1 = f1_score(true, pred, average='weighted')
         print('F1 score:', f1 * 100)
         print(confusion_matrix(true, pred))
+
+    cf_mat, class_acc = confuse_acc(X_test.float(), y_test, model)
+    if exp == 1:
+        plot_title = 'House_'+house_name+' control'
+        color = 'blue'
+    elif exp == 2:
+        plot_title = 'House_' + house_name + ' GAN'
+        color = 'green'
+    elif exp == 3:
+        plot_title = 'House_' + house_name + ' SMOTE'
+        color = 'orange'
+
+    save_dir = os.path.join('..', 'aloe', 'GAN', 'cf_plot', ''.format(os.path.sep))
+    plot_class_acc(class_acc, house_map, plot_title, save_dir, color)
+
     if rt:
-        return sum(acc_all_1)/len(acc_all_1), sum(F1_all_1)/len(F1_all_1)
+        return sum(acc_all_1)/len(acc_all_1), sum(F1_all_1)/len(F1_all_1), sum(F1_all_2)/len(F1_all_2)
 
 def rf_multiclass(X_train_feature, y_train_feature, X_test_feature, y_test_feature,
-                  X_fake_feature, y_fake_feature, GANmodel, test_set='fp', exp=1, runs=10, feature=True):
+                  X_fake_feature, y_fake_feature, GANmodel, house_name, house_map, test_set='fp', exp=1, runs=10, feature=True):
 
     X1, X2, y1, y2 = train_test_split(X_train_feature, y_train_feature, test_size=0.3, shuffle=True,
                                       stratify=y_train_feature, random_state=42)
@@ -145,33 +213,44 @@ def rf_multiclass(X_train_feature, y_train_feature, X_test_feature, y_test_featu
     clf_grid.fit(X_train_feature, y_train_feature)
     print('Best parameters are: {}'.format(clf_grid.best_params_))
 
-    f1_all = []
+    f1_all_1 = []
+    f1_all_2 = []
     acc_all =[]
     for i in range(runs):
         clf_tune = RandomForestClassifier(min_samples_leaf=clf_grid.best_params_['min_samples_leaf'],
                                           n_estimators=clf_grid.best_params_['n_estimators'], )
         clf_tune.fit(X_train, y_train)
         y_pred = clf_tune.predict(X_test)
-        f1 = f1_score(y_test, y_pred, average='weighted') * 100
+        f1_weight = f1_score(y_test, y_pred, average='weighted') * 100
+        f1_mac = f1_score(y_test, y_pred, average='macro') * 100
         acc = accuracy_score(y_test, y_pred)* 100
-        f1_all.append(f1)
+        f1_all_1.append(f1_weight)
+        f1_all_2.append(f1_mac)
         acc_all.append(acc)
 
-    print('Average f1:', np.mean(f1_all))
+
+    print('Average f1_weighted:', np.mean(f1_all_1))
+    print('Average f1_macro:', np.mean(f1_all_2))
     print('Average acc', np.mean(acc_all))
-    print(confusion_matrix(y_test, y_pred))
+    cf_mat = confusion_matrix(y_test, y_pred)
+    print(cf_mat)
 
-def get_col_use(house_name, reduce_ap):
-    if house_name == 'A':
-        col_idx_use = [1, 2, 3, 4, 5, 6, 7, 8]
-    else:
-        col_idx_use = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
-    col_idx_use_label = col_idx_use[len(col_idx_use) - 1] + 1
+    class_acc = []
+    for i in range(len(np.unique(y_test))):
+        class_acc.append(cf_mat[i][i] / np.sum(cf_mat[i]) * 100)
 
-    if reduce_ap:
-        if house_name == 'C':
-            col_idx_use = [1, 2, 4, 7, 9, 10]
-    return col_idx_use, col_idx_use_label
+    if exp == 1:
+        plot_title = 'RF_House_'+house_name+' control'
+        color = 'blue'
+    elif exp == 2:
+        plot_title = 'RF_House_' + house_name + ' GAN'
+        color = 'green'
+    elif exp == 3:
+        plot_title = 'RF_House_' + house_name + ' SMOTE'
+        color = 'orange'
+
+    save_dir = os.path.join('..', 'aloe', 'GAN', 'cf_plot', ''.format(os.path.sep))
+    plot_class_acc(class_acc, house_map, plot_title, save_dir, color)
 
 if __name__ == "__main__":
     data_directory = os.path.join('..', 'aloe', 'localisation', 'data', ''.format(os.path.sep))
@@ -180,9 +259,9 @@ if __name__ == "__main__":
     # device = torch.device("cpu")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    num_epochs = 160
+    num_epochs = 440
     house_name = 'C'
-    reduce_ap = True
+    reduce_ap = False
     col_idx_use, col_idx_use_label = get_col_use (house_name, reduce_ap)
 # load fingerprint data
     house_file = 'csv_house_' + house_name + '_fp.csv'
@@ -204,13 +283,22 @@ if __name__ == "__main__":
                            house_map=map_D,
                            full_scale=False, ymin=-0.1, ymax=1.1, save=False, model_name='house_D_real')
         get_stats(data_directory, house_file)
-    # GENERATE FAKE DATA
-    NUM_CLASSES = num_room_house[house_name]
-    APs = len(col_idx_use)
-    total_number = 1000
-    GANmodel = "conGAN-CNN_house_" + house_name
-    model_name = "ConGAN_wgp_rep_house_" + house_name + "_reduce_" + str(reduce_ap)
-    fake_data, y_fake, gen = get_fake_rssi(windowed_label, num_epochs, total_number, NUM_CLASSES, APs, save_directory, model_name, device)
+
+    plot_all= False
+    if plot_all:
+        for i in range(len(windowed_data)):
+            plot_line_rssi_all(windowed_data[i], windowed_label[i], transpose=False, house=house_name, house_map=house_map[house_name],
+                                   reduce=False, full_scale=False, ymin=-0.1, ymax=1.1, save=True, model_name='_idx'+str(i))
+
+    gen_fake = True
+    if gen_fake:
+        # GENERATE FAKE DATA
+        NUM_CLASSES = num_room_house[house_name]
+        APs = len(col_idx_use)
+        total_number = 600
+        GANmodel = "conGAN-CNN_house_" + house_name
+        model_name = "ConGAN_wgp_rep_house_" + house_name + "_reduce_" + str(reduce_ap)
+        fake_data, y_fake, gen = get_fake_rssi(windowed_label, num_epochs, total_number, NUM_CLASSES, APs, save_directory, model_name, device)
 
     # visualisation
     visualisation = True
@@ -222,26 +310,28 @@ if __name__ == "__main__":
                 plot_line_rssi_gan(fake_plot.cpu().detach().numpy(), i+1, transpose=True, house=house_name, house_map=house_map[house_name],
                                    reduce=reduce_ap, full_scale=False, ymin=-0.1, ymax=1.1, save=True, save_dir='GAN/result_visual/', model_name=model_name+'_e'+str(num_epochs)+'_', plot_idx=j)
 
-    windowed_data_tp = np.transpose(windowed_data, (0, 2, 1))
-    X_train_feature, y_train_feature = feature(windowed_data_tp, windowed_label, datatype='rssi') #(n,Aps,window)
-    # torch.save((X_train_feature, y_train_feature), data_directory + '/gan_data/house_C_living_train_10hop.pt')
-    X_train_feature, y_train_feature = torch.load(data_directory + '/gan_data/house_C_living_train_10hop.pt')
-    # windowed_data_fl_tp = np.transpose(windowed_data_fl, (0, 2, 1))
-    # X_test_feature, y_test_feature = feature(windowed_data_fl_tp, windowed_label_fl, datatype='rssi')
-    # torch.save((X_test_feature, y_test_feature), data_directory + '/gan_data/house_C_living_test_10hop.pt')
-    X_test_feature, y_test_feature = torch.load(data_directory + '/gan_data/house_C_living_test_10hop.pt')
 
-    # fake_data_tp = np.transpose(fake_data, (0, 2, 1))
-    # fake_data = fake_data.view(len(fake_data), 11, 20)
-    # X_fake_feature, y_fake_feature = feature(fake_data.detach().numpy(), y_fake.detach().numpy(), datatype='rssi')
-    # torch.save((X_fake_feature, y_fake_feature),data_directory + '/gan_data/house_C_feature_fake_' + str(GANmodel) + str(200) + '.pt')
-    X_fake_feature, y_fake_feature = torch.load(
-        data_directory + '/gan_data/house_C_feature_fake_' + str(GANmodel) + str(200) + '.pt')
 
-    windowed_label = windowed_label - 1
-    windowed_label_fl = windowed_label_fl - 1
-    y_train_feature = y_train_feature - 1
-    y_test_feature = y_test_feature - 1
+    # windowed_data_tp = np.transpose(windowed_data, (0, 2, 1))
+    # X_train_feature, y_train_feature = feature(windowed_data_tp, windowed_label, datatype='rssi') #(n,Aps,window)
+    # # torch.save((X_train_feature, y_train_feature), data_directory + '/gan_data/house_C_living_train_10hop.pt')
+    # X_train_feature, y_train_feature = torch.load(data_directory + '/gan_data/house_C_living_train_10hop.pt')
+    # # windowed_data_fl_tp = np.transpose(windowed_data_fl, (0, 2, 1))
+    # # X_test_feature, y_test_feature = feature(windowed_data_fl_tp, windowed_label_fl, datatype='rssi')
+    # # torch.save((X_test_feature, y_test_feature), data_directory + '/gan_data/house_C_living_test_10hop.pt')
+    # X_test_feature, y_test_feature = torch.load(data_directory + '/gan_data/house_C_living_test_10hop.pt')
+    #
+    # # fake_data_tp = np.transpose(fake_data, (0, 2, 1))
+    # # fake_data = fake_data.view(len(fake_data), 11, 20)
+    # # X_fake_feature, y_fake_feature = feature(fake_data.detach().numpy(), y_fake.detach().numpy(), datatype='rssi')
+    # # torch.save((X_fake_feature, y_fake_feature),data_directory + '/gan_data/house_C_feature_fake_' + str(GANmodel) + str(200) + '.pt')
+    # X_fake_feature, y_fake_feature = torch.load(
+    #     data_directory + '/gan_data/house_C_feature_fake_' + str(GANmodel) + str(200) + '.pt')
+    #
+    # windowed_label = windowed_label - 1
+    # windowed_label_fl = windowed_label_fl - 1
+    # y_train_feature = y_train_feature - 1
+    # y_test_feature = y_test_feature - 1
 
     multi = False
     if multi:
